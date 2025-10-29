@@ -1,289 +1,306 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { InterviewState, Feedback, FinalReport, HistoryItem } from './types';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { InterviewState, QuestionData, Feedback, FinalReport, HistoryItem, VocabularyItem } from './types';
 import * as geminiService from './services/geminiService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
-import { useLiveConversation } from './hooks/useLiveConversation';
+import { useSpeechToText } from './hooks/useSpeechToText';
 import { SpeakerIcon, LoadingSpinner, MicrophoneIcon, StopIcon } from './components/icons';
 
 const App: React.FC = () => {
-  const [interviewState, setInterviewState] = useState<InterviewState>(InterviewState.NOT_STARTED);
-  const [context, setContext] = useState('');
-  const [questions, setQuestions] = useState<string[]>([]);
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [currentAnswer, setCurrentAnswer] = useState('');
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
-  const [finalReport, setFinalReport] = useState<FinalReport | null>(null);
-  const [sessionHistory, setSessionHistory] = useState<HistoryItem[]>([]);
-  const [error, setError] = useState('');
-  
-  const { playAudio, isPlaying } = useAudioPlayer();
-  const { isRecording, transcript, startRecording, stopRecording } = useLiveConversation();
+    const [appState, setAppState] = useState<InterviewState>(InterviewState.CONTEXT_SELECTION);
+    const [context, setContext] = useState('');
+    const [questions, setQuestions] = useState<QuestionData[]>([]);
+    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+    const [currentAnswer, setCurrentAnswer] = useState('');
+    const [history, setHistory] = useState<HistoryItem[]>([]);
+    const [finalReport, setFinalReport] = useState<FinalReport | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setCurrentAnswer(transcript);
-  }, [transcript]);
+    const [currentImageUrl, setCurrentImageUrl] = useState<string | null>(null);
+    const { playAudio, isPlaying: isAudioPlaying } = useAudioPlayer();
+    const { isRecording, transcript, startTranscription, stopTranscription } = useSpeechToText();
 
-  useEffect(() => {
-    return () => {
-      stopRecording();
+    const bottomRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      if (transcript) {
+        setCurrentAnswer(transcript);
+      }
+    }, [transcript]);
+
+    useEffect(() => {
+        if (bottomRef.current) {
+            bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [history, finalReport]);
+
+    const handleStartSession = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!context.trim()) return;
+
+        setIsLoading(true);
+        setError(null);
+        try {
+            const fetchedQuestions = await geminiService.generateQuestions(context);
+            setQuestions(fetchedQuestions);
+            setCurrentQuestionIndex(0);
+            setHistory([]);
+            setAppState(InterviewState.SESSION_ACTIVE);
+            await fetchQuestionData(fetchedQuestions[0]);
+        } catch (err) {
+            setError('Failed to start session. Please try again.');
+            console.error(err);
+        } finally {
+            setIsLoading(false);
+        }
     };
-  }, [stopRecording]);
-  
-  const handleStartSession = useCallback(async () => {
-    if (!context.trim()) {
-      setError("Please enter a context to practice.");
-      // A little shake animation for the input would be nice, but for now, an error is fine.
-      setTimeout(() => setError(''), 3000);
-      return;
-    }
-    setInterviewState(InterviewState.GENERATING_QUESTIONS);
-    setError('');
-    try {
-      const fetchedQuestions = await geminiService.generateQuestions(context);
-      if (fetchedQuestions.length === 0) {
-        throw new Error("No questions were generated for this context.");
-      }
-      setQuestions(fetchedQuestions);
-      setCurrentQuestionIndex(0);
-      setInterviewState(InterviewState.ASKING_QUESTION);
-      const audioData = await geminiService.textToSpeech(fetchedQuestions[0]);
-      await playAudio(audioData);
-      setInterviewState(InterviewState.AWAITING_ANSWER);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unknown error occurred.');
-      setInterviewState(InterviewState.ERROR);
-    }
-  }, [context, playAudio]);
 
-  const handleSubmitAnswer = useCallback(async () => {
-    if (!currentAnswer.trim()) return;
-    setInterviewState(InterviewState.EVALUATING_ANSWER);
-    setError('');
-    try {
-      const currentQuestion = questions[currentQuestionIndex];
-      const evaluation = await geminiService.evaluateAnswer(currentQuestion, currentAnswer, context);
-      setFeedback(evaluation);
-      setSessionHistory(prev => [...prev, { question: currentQuestion, answer: currentAnswer, feedback: evaluation }]);
-      setInterviewState(InterviewState.SHOWING_FEEDBACK);
-      const feedbackIntro = `Here is your feedback. Your estimated IELTS fluency band is ${evaluation.fluency.toFixed(1)}. ${evaluation.tip}. A native-like version would be: ${evaluation.nativeExample}`;
-      const audioData = await geminiService.textToSpeech(feedbackIntro);
-      await playAudio(audioData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unknown error occurred.');
-      setInterviewState(InterviewState.ERROR);
-    }
-  }, [currentAnswer, questions, currentQuestionIndex, context, playAudio]);
+    const fetchQuestionData = async (questionData: QuestionData) => {
+        setCurrentImageUrl(null);
+        // Play question audio
+        geminiService.generateSpeech(questionData.question).then(playAudio);
+        // Generate image
+        geminiService.generateImage(questionData.imagePrompt)
+            .then(setCurrentImageUrl)
+            .catch(err => console.error("Image generation failed:", err));
+    };
 
-  const handleNextQuestion = useCallback(async () => {
-    setFeedback(null);
-    if (currentQuestionIndex < questions.length - 1) {
-      const nextIndex = currentQuestionIndex + 1;
-      setCurrentQuestionIndex(nextIndex);
-      setCurrentAnswer('');
-      setInterviewState(InterviewState.ASKING_QUESTION);
-      const audioData = await geminiService.textToSpeech(questions[nextIndex]);
-      await playAudio(audioData);
-      setInterviewState(InterviewState.AWAITING_ANSWER);
-    } else {
-      setInterviewState(InterviewState.GENERATING_REPORT);
-      try {
-        const report = await geminiService.generateFinalReport(context, sessionHistory);
-        setFinalReport(report);
-        setInterviewState(InterviewState.COMPLETED);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'An unknown error occurred.');
-        setInterviewState(InterviewState.ERROR);
-      }
-    }
-  }, [currentQuestionIndex, questions, context, sessionHistory, playAudio]);
+    const handleAnswerSubmit = async () => {
+        if (!currentAnswer.trim()) return;
 
-  const handleRestart = () => {
-    setInterviewState(InterviewState.NOT_STARTED);
-    setContext('');
-    setQuestions([]);
-    setCurrentQuestionIndex(0);
-    setCurrentAnswer('');
-    setFeedback(null);
-    setFinalReport(null);
-    setSessionHistory([]);
-    setError('');
-  };
+        setIsLoading(true);
+        setError(null);
 
-  const handleStartRecording = () => {
-    setCurrentAnswer('');
-    startRecording();
-  };
-  
-  const isLoading = [
-    InterviewState.GENERATING_QUESTIONS,
-    InterviewState.ASKING_QUESTION,
-    InterviewState.EVALUATING_ANSWER,
-    InterviewState.GENERATING_REPORT,
-  ].includes(interviewState);
+        try {
+            const questionData = questions[currentQuestionIndex];
+            const feedback = await geminiService.evaluateAnswer(questionData.question, currentAnswer);
+            
+            const newHistoryItem: HistoryItem = {
+                questionData,
+                answer: currentAnswer,
+                feedback,
+                imageUrl: currentImageUrl ?? undefined,
+            };
+            
+            const updatedHistory = [...history, newHistoryItem];
+            setHistory(updatedHistory);
 
-  const loadingText = () => {
-    switch (interviewState) {
-      case InterviewState.GENERATING_QUESTIONS: return 'Preparing your questions...';
-      case InterviewState.EVALUATING_ANSWER: return 'Evaluating your answer...';
-      case InterviewState.GENERATING_REPORT: return 'Generating your final report...';
-      default: return 'Loading...';
-    }
-  };
+            // Play feedback audio
+            const feedbackSpeech = `Your fluency band is ${feedback.fluencyBand}. Here's a tip: ${feedback.improvementTip}. A more native-like version would be: ${feedback.nativeLikeExample}`;
+            geminiService.generateSpeech(feedbackSpeech).then(playAudio);
 
-  return (
-    <div className="bg-slate-900 text-white min-h-screen flex flex-col items-center justify-center p-4 font-sans">
-      <div className="w-full max-w-2xl mx-auto">
-        <header className="text-center mb-8">
-          <h1 className="text-4xl md:text-5xl font-bold text-cyan-400">Contextual Fluency Coach</h1>
-          <p className="text-slate-400 mt-2">Practice English for any real-world scenario.</p>
-        </header>
+            setCurrentAnswer('');
+            
+            if (currentQuestionIndex < questions.length - 1) {
+                const nextIndex = currentQuestionIndex + 1;
+                setCurrentQuestionIndex(nextIndex);
+                await fetchQuestionData(questions[nextIndex]);
+            } else {
+                // End of session, generate report
+                const report = await geminiService.generateFinalReport(updatedHistory);
+                setFinalReport(report);
+                setAppState(InterviewState.FINAL_REPORT);
+                geminiService.generateSpeech("Congratulations, you've completed the session. Here is your final report.").then(playAudio);
+            }
 
-        <main className="bg-slate-800 rounded-lg shadow-2xl p-6 md:p-8 min-h-[24rem] flex flex-col justify-between transition-all duration-300">
-          {interviewState === InterviewState.NOT_STARTED && (
-            <div className="text-center flex flex-col items-center justify-center h-full">
-              <h2 className="text-2xl font-semibold mb-2">What context would you like to practice today?</h2>
-              <p className="text-slate-300 mb-6">e.g., "At a restaurant", "Job interview for a React developer", "US immigration interview"</p>
-              <input 
-                type="text"
-                value={context}
-                onChange={(e) => setContext(e.target.value)}
-                placeholder="Enter a context..."
-                className="w-full max-w-md bg-slate-700 border border-slate-600 rounded-lg p-3 mb-4 focus:ring-2 focus:ring-cyan-500 focus:outline-none transition"
-              />
-              <button onClick={handleStartSession} className="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">
-                Start Session
-              </button>
-            </div>
-          )}
+        } catch (err) {
+            setError('Failed to evaluate answer. Please try again.');
+            console.error(err);
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
-          {(isLoading && interviewState !== InterviewState.ASKING_QUESTION) && (
-            <div className="text-center flex flex-col items-center justify-center h-full">
-              <LoadingSpinner className="w-12 h-12 text-cyan-400" />
-              <p className="mt-4 text-slate-300">{loadingText()}</p>
-            </div>
-          )}
+    const handleNewSession = () => {
+        setAppState(InterviewState.CONTEXT_SELECTION);
+        setContext('');
+        setQuestions([]);
+        setCurrentQuestionIndex(0);
+        setCurrentAnswer('');
+        setHistory([]);
+        setFinalReport(null);
+        setError(null);
+        setCurrentImageUrl(null);
+    };
 
-          {(interviewState === InterviewState.AWAITING_ANSWER || interviewState === InterviewState.EVALUATING_ANSWER || interviewState === InterviewState.ASKING_QUESTION) && questions.length > 0 && (
-            <div>
-              <p className="text-sm text-cyan-400 font-semibold mb-2">Question {currentQuestionIndex + 1} of {questions.length} | Context: {context}</p>
-              <h3 className="text-xl md:text-2xl font-semibold text-slate-100 mb-4">{questions[currentQuestionIndex]}</h3>
-              <textarea
-                value={currentAnswer}
-                onChange={(e) => setCurrentAnswer(e.target.value)}
-                placeholder="Type or record your answer here..."
-                className="w-full h-40 bg-slate-900 border border-slate-700 rounded-lg p-3 focus:ring-2 focus:ring-cyan-500 focus:outline-none transition"
-                disabled={isLoading || isRecording}
-              />
-            </div>
-          )}
-          
-          {interviewState === InterviewState.SHOWING_FEEDBACK && feedback && (
-            <div className="space-y-4">
-                <h3 className="text-2xl font-semibold text-cyan-400 mb-4">Feedback</h3>
-                <div className="bg-slate-900/50 p-4 rounded-lg">
-                    <p className="text-sm font-bold text-slate-400">🧩 IELTS-LIKE FLUENCY BAND</p>
-                    <p className="text-2xl font-bold text-white">{feedback.fluency.toFixed(1)}</p>
-                </div>
-                 <div className="bg-slate-900/50 p-4 rounded-lg">
-                    <p className="text-sm font-bold text-slate-400">🗣️ IMPROVEMENT TIP</p>
-                    <p className="text-slate-300 mt-1">{feedback.tip}</p>
-                </div>
-                 <div className="bg-slate-900/50 p-4 rounded-lg">
-                    <p className="text-sm font-bold text-slate-400">💬 NATIVE-LIKE EXAMPLE</p>
-                    <p className="text-slate-300 mt-1 italic">"{feedback.nativeExample}"</p>
-                </div>
-            </div>
-          )}
-
-          {interviewState === InterviewState.COMPLETED && finalReport && (
-            <div>
-                <h2 className="text-3xl font-bold text-cyan-400 mb-4 text-center">Session Report</h2>
-                <div className="space-y-3">
-                    <div className="bg-slate-900/50 p-4 rounded-lg">
-                        <h4 className="font-bold text-slate-300">Top Strengths</h4>
-                        <p className="text-slate-400">{finalReport.topStrengths}</p>
-                    </div>
-                     <div className="bg-slate-900/50 p-4 rounded-lg">
-                        <h4 className="font-bold text-slate-300">Improvement Areas</h4>
-                        <p className="text-slate-400">{finalReport.improvementAreas}</p>
-                    </div>
-                     <div className="bg-slate-900/50 p-4 rounded-lg">
-                        <h4 className="font-bold text-slate-300">Expressions to Review</h4>
-                        <ul className="list-disc list-inside text-slate-400">
-                            {finalReport.expressionsToReview.map((exp, i) => <li key={i}>{exp}</li>)}
-                        </ul>
-                    </div>
-                     <div className="bg-slate-900/50 p-4 rounded-lg">
-                        <h4 className="font-bold text-slate-300">Next Recommended Context</h4>
-                        <p className="text-slate-400">{finalReport.nextRecommendedContext}</p>
-                    </div>
-                </div>
-            </div>
-          )}
-
-          {interviewState === InterviewState.ERROR && (
-            <div className="text-center flex flex-col items-center justify-center h-full">
-              <h2 className="text-2xl font-semibold text-red-500 mb-4">An Error Occurred</h2>
-              <p className="text-slate-300 bg-red-900/50 p-4 rounded">{error}</p>
-            </div>
-          )}
-
-
-          <div className="mt-6 text-center">
-            {interviewState === InterviewState.AWAITING_ANSWER && (
-               <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+    const renderContextSelection = () => (
+        <div className="w-full max-w-lg mx-auto text-center">
+            <h1 className="text-4xl font-bold mb-4 text-gray-900">AI Fluency Coach</h1>
+            <p className="text-lg text-gray-600 mb-8">Practice your English speaking skills in any context.</p>
+            <form onSubmit={handleStartSession} className="flex flex-col sm:flex-row gap-4">
+                <input
+                    type="text"
+                    value={context}
+                    onChange={(e) => setContext(e.target.value)}
+                    placeholder="E.g., 'Immigration Interview at the US embassy'"
+                    className="flex-grow p-4 border rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500"
+                    disabled={isLoading}
+                />
                 <button
-                  onClick={isRecording ? stopRecording : handleStartRecording}
-                  disabled={isLoading}
-                  className={`font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 flex items-center justify-center gap-2 w-full sm:w-auto ${
-                    isRecording
-                      ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse'
-                      : 'bg-slate-600 hover:bg-slate-500 text-white'
-                  } disabled:bg-slate-700 disabled:cursor-not-allowed`}
+                    type="submit"
+                    className="bg-blue-600 text-white font-bold py-4 px-8 rounded-lg shadow-md hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center"
+                    disabled={isLoading}
                 >
-                  {isRecording ? <StopIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
-                  <span>{isRecording ? 'Stop Recording' : 'Record Answer'}</span>
+                    {isLoading ? <LoadingSpinner className="w-6 h-6" /> : "Start Session"}
                 </button>
-                <button 
-                  onClick={handleSubmitAnswer} 
-                  disabled={!currentAnswer.trim() || isLoading || isRecording} 
-                  className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-600 disabled:cursor-not-allowed text-slate-900 font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 w-full sm:w-auto"
-                >
-                  Submit Answer
-                </button>
-              </div>
-            )}
-            {(isLoading && (interviewState === InterviewState.EVALUATING_ANSWER || interviewState === InterviewState.ASKING_QUESTION)) && (
-              <div className="flex justify-center items-center gap-2">
-                 <LoadingSpinner className="w-6 h-6 text-cyan-400" />
-                 <span className="text-slate-300">{loadingText()}</span>
-              </div>
-            )}
-            {interviewState === InterviewState.SHOWING_FEEDBACK && (
-              <button onClick={handleNextQuestion} className="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 w-full sm:w-auto">
-                {currentQuestionIndex < questions.length - 1 ? 'Next Question' : 'Finish & View Report'}
-              </button>
-            )}
-             {(interviewState === InterviewState.COMPLETED || interviewState === InterviewState.ERROR) && (
-              <button onClick={handleRestart} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 w-full sm:w-auto">
+            </form>
+        </div>
+    );
+    
+    const renderSessionActive = () => {
+        const currentQuestion = questions[currentQuestionIndex];
+        const lastHistoryItem = history.length > 0 ? history[history.length-1] : null;
+
+        return (
+            <div className="w-full max-w-6xl mx-auto space-y-6">
+                <h1 className="text-2xl font-bold text-center text-gray-800">Context: <span className="text-blue-600">{context}</span></h1>
+                <p className="text-center text-gray-500">Question {currentQuestionIndex + 1} of {questions.length}</p>
+                
+                {history.length > 0 && lastHistoryItem && (
+                    <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
+                        <h3 className="font-bold text-lg mb-4 text-gray-800">Your Previous Answer & Feedback</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            {/* Left part: Image and Question */}
+                            <div className="md:col-span-1 space-y-2">
+                                {lastHistoryItem.imageUrl && (
+                                    <img src={lastHistoryItem.imageUrl} alt={lastHistoryItem.questionData.imagePrompt} className="w-full object-cover rounded-lg" />
+                                )}
+                                <p className="font-semibold text-gray-700 text-sm">{lastHistoryItem.questionData.question}</p>
+                            </div>
+                    
+                            {/* Right part: Answer and Feedback */}
+                            <div className="md:col-span-2 space-y-4">
+                                <p className="italic text-gray-600">Your answer: "{lastHistoryItem.answer}"</p>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
+                                    <div className="bg-blue-50 p-3 rounded sm:col-span-1">
+                                        <p className="font-bold text-blue-800 text-sm">IELTS-Like Fluency Band</p>
+                                        <p className="text-2xl font-light">{lastHistoryItem.feedback.fluencyBand.toFixed(1)} / 9.0</p>
+                                    </div>
+                                    <div className="bg-green-50 p-3 rounded sm:col-span-2">
+                                        <p className="font-bold text-green-800 text-sm">Improvement Tip</p>
+                                        <p className="text-sm">{lastHistoryItem.feedback.improvementTip}</p>
+                                    </div>
+                                </div>
+                                <div className="bg-indigo-50 p-3 rounded">
+                                    <p className="font-bold text-indigo-800 text-sm">Native-like Example</p>
+                                    <p className="italic text-sm">"{lastHistoryItem.feedback.nativeLikeExample}"</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Left Column: Image & Question */}
+                    <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200 space-y-4">
+                        <div className="w-full aspect-video bg-gray-200 rounded-lg flex items-center justify-center">
+                            {currentImageUrl ? 
+                                <img src={currentImageUrl} alt={currentQuestion.imagePrompt} className="w-full h-full object-cover rounded-lg" /> :
+                                <LoadingSpinner className="w-10 h-10 text-gray-400"/>
+                            }
+                        </div>
+                        <div className="flex items-start justify-between space-x-3">
+                            <h2 className="text-xl font-semibold text-gray-900">{currentQuestion.question}</h2>
+                            <button onClick={() => geminiService.generateSpeech(currentQuestion.question).then(playAudio)} disabled={isAudioPlaying} className="p-2 rounded-full hover:bg-gray-200 disabled:text-gray-400 flex-shrink-0">
+                                {isAudioPlaying ? <LoadingSpinner className="w-6 h-6"/> : <SpeakerIcon className="w-6 h-6"/>}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Right Column: Vocabulary & Answer */}
+                    <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
+                        <h3 className="font-bold mb-2 text-gray-800">Key Vocabulary</h3>
+                        <ul className="space-y-2 mb-4">
+                           {currentQuestion.vocabulary.map((item, index) => (
+                               <li key={index} className="flex items-baseline justify-between">
+                                   <div>
+                                       <span className="font-semibold text-gray-800">{item.word}</span>: <span className="text-gray-600">{item.definition}</span>
+                                   </div>
+                                   <span className="text-sm font-medium bg-gray-200 text-gray-800 px-2 py-1 rounded-full">{item.level}</span>
+                               </li>
+                           ))}
+                        </ul>
+                        <div className="relative">
+                            <textarea
+                                value={currentAnswer}
+                                onChange={(e) => setCurrentAnswer(e.target.value)}
+                                placeholder="Speak or type your answer here..."
+                                className="w-full p-4 border rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 h-40 resize-none"
+                                disabled={isLoading || isRecording}
+                            />
+                            <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                                <button
+                                  onClick={isRecording ? stopTranscription : startTranscription}
+                                  className={`p-3 rounded-full text-white shadow-md transition-transform transform hover:scale-110 ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-blue-600'}`}
+                                  disabled={isLoading}
+                                >
+                                  {isRecording ? <StopIcon className="w-6 h-6" /> : <MicrophoneIcon className="w-6 h-6" />}
+                                </button>
+                            </div>
+                        </div>
+                        <button
+                            onClick={handleAnswerSubmit}
+                            className="w-full mt-4 bg-green-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-green-700 disabled:bg-gray-400 flex items-center justify-center"
+                            disabled={isLoading || !currentAnswer.trim() || isRecording}
+                        >
+                            {isLoading ? <LoadingSpinner className="w-6 h-6"/> : 'Submit Answer'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderFinalReport = () => (
+        <div className="w-full max-w-3xl mx-auto bg-white p-8 rounded-lg shadow-2xl border">
+            <h1 className="text-3xl font-bold text-center mb-6 text-gray-900">Session Report</h1>
+            <h2 className="text-xl font-semibold mb-2 text-gray-800">Context: <span className="font-normal text-blue-600">{context}</span></h2>
+
+            <div className="space-y-6">
+                <div>
+                    <h3 className="font-bold text-green-700 text-lg mb-2">✅ Top Strengths</h3>
+                    <ul className="list-disc list-inside bg-green-50 p-4 rounded-md">
+                        {finalReport?.topStrengths.map((item, i) => <li key={i}>{item}</li>)}
+                    </ul>
+                </div>
+                <div>
+                    <h3 className="font-bold text-yellow-700 text-lg mb-2">📈 Improvement Areas</h3>
+                    <ul className="list-disc list-inside bg-yellow-50 p-4 rounded-md">
+                        {finalReport?.improvementAreas.map((item, i) => <li key={i}>{item}</li>)}
+                    </ul>
+                </div>
+                <div>
+                    <h3 className="font-bold text-indigo-700 text-lg mb-2">📚 Expressions to Review</h3>
+                    <ul className="list-disc list-inside bg-indigo-50 p-4 rounded-md">
+                        {finalReport?.expressionsToReview.map((item, i) => <li key={i}>{item}</li>)}
+                    </ul>
+                </div>
+                <div>
+                    <h3 className="font-bold text-blue-700 text-lg mb-2">🚀 Next Recommended Context</h3>
+                    <p className="bg-blue-50 p-4 rounded-md italic">"{finalReport?.nextRecommendedContext}"</p>
+                </div>
+            </div>
+
+            <button
+                onClick={handleNewSession}
+                className="w-full mt-8 bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700"
+            >
                 Start New Session
-              </button>
-            )}
-          </div>
+            </button>
+        </div>
+    );
+
+    return (
+        <main className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 sm:p-6 lg:p-8">
+            {error && <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">{error}</div>}
+            {appState === InterviewState.CONTEXT_SELECTION && renderContextSelection()}
+            {appState === InterviewState.SESSION_ACTIVE && renderSessionActive()}
+            {appState === InterviewState.FINAL_REPORT && renderFinalReport()}
+            <div ref={bottomRef} />
         </main>
-        
-        <footer className="text-center text-slate-500 mt-8 text-sm">
-          <p>Powered by Google Gemini</p>
-          {isPlaying && (
-              <div className="fixed bottom-5 right-5 bg-slate-700 p-3 rounded-full shadow-lg flex items-center gap-2">
-                  <SpeakerIcon className="w-6 h-6 text-cyan-400 animate-pulse" />
-                  <span className="text-sm">Playing audio...</span>
-              </div>
-          )}
-        </footer>
-      </div>
-    </div>
-  );
+    );
 };
 
 export default App;
