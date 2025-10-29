@@ -1,9 +1,9 @@
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { InterviewState } from './types';
 import * as geminiService from './services/geminiService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
-import { SpeakerIcon, LoadingSpinner } from './components/icons';
+import { useLiveConversation } from './hooks/useLiveConversation';
+import { SpeakerIcon, LoadingSpinner, MicrophoneIcon, StopIcon } from './components/icons';
 
 const App: React.FC = () => {
   const [interviewState, setInterviewState] = useState<InterviewState>(InterviewState.NOT_STARTED);
@@ -12,8 +12,22 @@ const App: React.FC = () => {
   const [currentAnswer, setCurrentAnswer] = useState('');
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
+  
   const { playAudio, isPlaying } = useAudioPlayer();
+  const { isRecording, transcript, startRecording, stopRecording } = useLiveConversation();
 
+  // Update the answer in the textarea as it's being transcribed
+  useEffect(() => {
+    setCurrentAnswer(transcript);
+  }, [transcript]);
+
+  // Ensure recording is stopped if the component unmounts
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    };
+  }, [stopRecording]);
+  
   const handleStartInterview = useCallback(async () => {
     setInterviewState(InterviewState.GENERATING_QUESTIONS);
     setError('');
@@ -75,10 +89,12 @@ const App: React.FC = () => {
     setError('');
   };
 
+  const handleStartRecording = () => {
+    setCurrentAnswer(''); // Clear previous answer before recording
+    startRecording();
+  };
+
   const renderFeedback = (text: string) => {
-    // Fix: Replaced a simple string replace with a more robust markdown-like
-    // parser for bold text. This correctly handles various formatting cases and
-    // also resolves the original `replaceAll` compatibility issue.
     return text.split('\n').map((line, index) => {
       const parts = line.split(/(\*\*.*?\*\*)/g);
       return (
@@ -112,7 +128,7 @@ const App: React.FC = () => {
           {interviewState === InterviewState.NOT_STARTED && (
             <div className="text-center flex flex-col items-center justify-center h-full">
               <h2 className="text-2xl font-semibold mb-4">Ready to practice?</h2>
-              <p className="text-slate-300 mb-6">You'll be asked 10 behavioral questions. After each answer, you'll receive AI-powered feedback.</p>
+              <p className="text-slate-300 mb-6">You'll be asked 10 behavioral questions. Answer by typing or recording your voice. After each answer, you'll receive AI-powered feedback.</p>
               <button onClick={handleStartInterview} className="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">
                 Start Interview
               </button>
@@ -133,9 +149,9 @@ const App: React.FC = () => {
               <textarea
                 value={currentAnswer}
                 onChange={(e) => setCurrentAnswer(e.target.value)}
-                placeholder="Type your answer here..."
+                placeholder="Type or record your answer here..."
                 className="w-full h-40 bg-slate-900 border border-slate-700 rounded-lg p-3 focus:ring-2 focus:ring-cyan-500 focus:outline-none transition"
-                disabled={isLoading}
+                disabled={isLoading || isRecording}
               />
             </div>
           )}
@@ -166,9 +182,27 @@ const App: React.FC = () => {
 
           <div className="mt-6 text-center">
             {interviewState === InterviewState.AWAITING_ANSWER && (
-              <button onClick={handleSubmitAnswer} disabled={!currentAnswer.trim() || isLoading} className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-600 disabled:cursor-not-allowed text-slate-900 font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 w-full sm:w-auto">
-                Submit Answer
-              </button>
+               <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+                <button
+                  onClick={isRecording ? stopRecording : handleStartRecording}
+                  disabled={isLoading}
+                  className={`font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 flex items-center justify-center gap-2 w-full sm:w-auto ${
+                    isRecording
+                      ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse'
+                      : 'bg-slate-600 hover:bg-slate-500 text-white'
+                  } disabled:bg-slate-700 disabled:cursor-not-allowed`}
+                >
+                  {isRecording ? <StopIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
+                  <span>{isRecording ? 'Stop Recording' : 'Record Answer'}</span>
+                </button>
+                <button 
+                  onClick={handleSubmitAnswer} 
+                  disabled={!currentAnswer.trim() || isLoading || isRecording} 
+                  className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-600 disabled:cursor-not-allowed text-slate-900 font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 w-full sm:w-auto"
+                >
+                  Submit Answer
+                </button>
+              </div>
             )}
             {isLoading && interviewState !== InterviewState.GENERATING_QUESTIONS && (
               <div className="flex justify-center items-center gap-2">
